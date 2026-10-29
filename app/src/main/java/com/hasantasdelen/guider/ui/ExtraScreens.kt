@@ -269,6 +269,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
     val speaker = rememberSpeaker()
     var voiceDialog by remember { mutableStateOf(false) }
+    var voiceHelp by remember { mutableStateOf(false) }
     var engineMenu by remember { mutableStateOf(false) }
     var themeMenu by remember { mutableStateOf(false) }
     var langMenu by remember { mutableStateOf(false) }
@@ -352,10 +353,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }) { Text(L("Test", "Dene")) }
             }
             TextButton(onClick = {
-                try { ctx.startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+                voiceHelp = true
             }) { Text(L("Install voices (e.g. Turkish)", "Ses paketi yükle (ör. Türkçe)")) }
             TextButton(onClick = {
-                try { ctx.startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+                com.hasantasdelen.guider.tts.openTtsSettings(ctx)
             }) { Text(L("Android text-to-speech settings", "Android metin okuma ayarları")) }
 
             Section(L("Translation", "Çeviri"))
@@ -398,6 +399,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
     if (voiceDialog) TtsSettingsDialog(speaker) { voiceDialog = false }
+    if (voiceHelp) com.hasantasdelen.guider.tts.VoiceInstallDialog(speaker, "tr") { voiceHelp = false }
 }
 
 @Composable

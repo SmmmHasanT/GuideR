@@ -109,6 +109,12 @@ class Speaker(context: Context) {
         emptyList()
     }
 
+    /** Package of the engine actually in use. */
+    fun currentEngine(): String? = Prefs.ttsEngine.ifBlank { null } ?: try { tts?.defaultEngine } catch (e: Exception) { null }
+
+    /** Re-check the language after the user installed voice data. */
+    fun recheck() { if (ready) applySettings() else restartEngine() }
+
     fun engines(): List<TextToSpeech.EngineInfo> = try {
         tts?.engines ?: emptyList()
     } catch (e: Exception) {

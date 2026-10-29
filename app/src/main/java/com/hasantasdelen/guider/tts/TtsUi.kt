@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.hasantasdelen.guider.data.Prefs
 import com.hasantasdelen.guider.util.L
+import com.hasantasdelen.guider.util.Lang
 import kotlinx.coroutines.tasks.await
 import java.util.Locale
 
@@ -51,7 +52,13 @@ fun TtsBar(
     onStartFromVisible: () -> Unit,
 ) {
     var showSettings by remember { mutableStateOf(false) }
+    var voiceHelp by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
+    // When the user comes back from installing a voice, check again automatically.
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        if (speaker.error?.startsWith("missing_lang:") == true) speaker.recheck()
+        onPauseOrDispose { }
+    }
     Surface(tonalElevation = 6.dp, color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
             val err = speaker.error
@@ -63,12 +70,7 @@ fun TtsBar(
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = {
-                        try {
-                            ctx.startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                        } catch (_: Exception) {
-                        }
-                    }) { Text(L("Install", "Yükle")) }
+                    TextButton(onClick = { voiceHelp = true }) { Text(L("Install", "Yükle")) }
                 }
             }
             if (showCaption) {
@@ -117,6 +119,99 @@ fun TtsBar(
     if (showSettings) {
         TtsSettingsDialog(speaker) { showSettings = false }
     }
+    if (voiceHelp) {
+        val lang = speaker.error?.removePrefix("missing_lang:") ?: "tr"
+        VoiceInstallDialog(speaker, lang) { voiceHelp = false }
+    }
+}
+
+private const val GOOGLE_TTS = "com.google.android.tts"
+
+private fun tryStart(ctx: android.content.Context, vararg intents: Intent): Boolean {
+    for (i in intents) {
+        try {
+            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return true
+        } catch (_: Exception) {
+        }
+    }
+    android.widget.Toast.makeText(ctx, L("Could not open this screen on this device.", "Bu ekran bu cihazda açılamadı."), android.widget.Toast.LENGTH_LONG).show()
+    return false
+}
+
+fun openVoiceDataInstall(ctx: android.content.Context, engine: String?) {
+    val list = ArrayList<Intent>()
+    if (engine != null) list.add(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).setPackage(engine))
+    list.add(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA))
+    list.add(Intent("com.android.settings.TTS_SETTINGS"))
+    tryStart(ctx, *list.toTypedArray())
+}
+
+fun openTtsSettings(ctx: android.content.Context) = tryStart(
+    ctx,
+    Intent("com.android.settings.TTS_SETTINGS"),
+    Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS),
+    Intent(android.provider.Settings.ACTION_SETTINGS),
+)
+
+fun openGoogleTtsInStore(ctx: android.content.Context) = tryStart(
+    ctx,
+    Intent(Intent.ACTION_VIEW, android.net.Uri.parse("market://details?id=$GOOGLE_TTS")),
+    Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://play.google.com/store/apps/details?id=$GOOGLE_TTS")),
+)
+
+/** Step-by-step help when the device has no voice for the guide's language. */
+@Composable
+fun VoiceInstallDialog(speaker: Speaker, lang: String, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val engines = remember { speaker.engines() }
+    val current = remember { speaker.currentEngine() }
+    val hasGoogle = engines.any { it.name == GOOGLE_TTS }
+    val usingGoogle = current == GOOGLE_TTS
+    val langName = Locale.forLanguageTag(lang).getDisplayLanguage(Locale.forLanguageTag(if (Lang.isTr) "tr" else "en"))
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(L("Install a voice", "Ses yükle") + " ($langName)") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    L("Engine in use: ", "Kullanılan ses motoru: ") +
+                        (engines.firstOrNull { it.name == current }?.label ?: current ?: L("none", "yok")),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(10.dp))
+                if (!hasGoogle) {
+                    Text(L("1. Install \"Speech Services by Google\" from Play Store (free).",
+                        "1. Play Store'dan \"Google Konuşma Hizmetleri\" (Speech Services by Google) uygulamasını yükle (ücretsiz)."))
+                    OutlinedButton(onClick = { openGoogleTtsInStore(ctx) }) { Text(L("Open Play Store", "Play Store'u aç")) }
+                    Spacer(Modifier.height(8.dp))
+                    Text(L("2. Come back here and tap \"Use Google engine\".", "2. Buraya dönüp \"Google motorunu kullan\"a bas."))
+                } else if (!usingGoogle) {
+                    Text(L("Google's engine is installed but not in use. Switch to it:", "Google ses motoru yüklü ama kullanılmıyor. Ona geç:"))
+                    Button(onClick = { Prefs.ttsEngine = GOOGLE_TTS; speaker.restartEngine(); onDismiss() }) {
+                        Text(L("Use Google engine", "Google motorunu kullan"))
+                    }
+                }
+                if (hasGoogle) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(L("Download the $langName voice data:", "$langName ses verisini indir:"))
+                    OutlinedButton(onClick = { openVoiceDataInstall(ctx, if (usingGoogle) GOOGLE_TTS else current) }) {
+                        Text(L("Download voice data", "Ses verisini indir"))
+                    }
+                    Text(
+                        L("If that screen doesn't open: Android Settings → Text-to-speech → ⚙ next to Google → Install voice data → $langName.",
+                            "O ekran açılmazsa: Android Ayarları → Metin okuma çıkışı → Google'ın yanındaki ⚙ → Ses verilerini yükle → $langName."),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { openTtsSettings(ctx) }) { Text(L("Android text-to-speech settings", "Android metin okuma ayarları")) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { speaker.recheck(); onDismiss() }) { Text(L("I installed it, try again", "Yükledim, tekrar dene")) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(L("Close", "Kapat")) } }
+    )
 }
 
 val TtsLanguages = listOf(
