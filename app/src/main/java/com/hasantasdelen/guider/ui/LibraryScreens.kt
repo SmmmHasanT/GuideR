@@ -41,6 +41,7 @@ import com.hasantasdelen.guider.util.formatSize
 import com.hasantasdelen.guider.util.newId
 import com.hasantasdelen.guider.web.GameHit
 import com.hasantasdelen.guider.web.GameMeta
+import com.hasantasdelen.guider.web.Libretro
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -169,16 +170,38 @@ fun AddGameScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
     var customDialog by remember { mutableStateOf(false) }
     var searchJob by remember { mutableStateOf<Job?>(null) }
 
-    LaunchedEffect(query) {
-        if (query.trim().length < 2) { results = emptyList(); return@LaunchedEffect }
+    var console by remember { mutableStateOf(Libretro.consoles.firstOrNull { it.system == Prefs.coverConsole }) }
+    var lrResults by remember { mutableStateOf<List<Libretro.Hit>>(emptyList()) }
+
+    LaunchedEffect(query, console) {
+        if (query.trim().length < 2) { results = emptyList(); lrResults = emptyList(); return@LaunchedEffect }
         delay(450)
         loading = true; error = null
         try {
-            results = GameMeta.search(query.trim())
+            val c = console
+            if (c == null) results = GameMeta.search(query.trim())
+            else lrResults = Libretro.search(ctx, c, query.trim())
         } catch (e: Exception) {
-            error = e.message
+            error = L("Search failed: ", "Arama başarısız: ") + (e.message ?: "")
         }
         loading = false
+    }
+
+    fun addFromLibretro(h: Libretro.Hit) {
+        adding = true
+        scope.launch {
+            val bytes = Libretro.download(h)
+            val cover = bytes?.let { Library.saveCoverBytes(it) }
+            // year from Wikipedia, best effort
+            val year = try {
+                GameMeta.search(h.title).firstOrNull { it.description.contains("game", true) }
+                    ?.let { GameMeta.details(it).year }
+            } catch (e: Exception) { null }
+            val g = Game(newId(), h.title, coverPath = cover, year = year, platforms = h.console.short)
+            Library.addGame(g)
+            adding = false
+            onAdded(g.id)
+        }
     }
 
     Scaffold(topBar = {
@@ -189,15 +212,31 @@ fun AddGameScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
         )
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
+            ConsolePicker(console) { c -> console = c; Prefs.coverConsole = c?.system ?: "" }
             OutlinedTextField(
                 query, { query = it }, singleLine = true,
                 placeholder = { Text(L("Search game title", "Oyun adı ara")) },
                 leadingIcon = { Icon(Icons.Filled.Search, null) },
-                modifier = Modifier.fillMaxWidth().padding(12.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
             )
-            if (loading || adding) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (console != null) {
+                Text(
+                    L("Covers from the libretro archive (RetroArch). First search on a console downloads its list once.",
+                        "Kapaklar libretro arşivinden (RetroArch). Bir konsolda ilk aramada liste bir kez indirilir."),
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 14.dp)
+                )
+            }
+            if (loading || adding) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
             LazyColumn(Modifier.fillMaxSize()) {
+                if (console != null) {
+                    items(lrResults) { h ->
+                        LibretroRow(h, enabled = !adding) { addFromLibretro(h) }
+                    }
+                    if (!loading && query.length >= 2 && lrResults.isEmpty() && error == null) {
+                        item { Text(L("No covers found on this console.", "Bu konsolda kapak bulunamadı."), Modifier.padding(16.dp)) }
+                    }
+                } else {
                 items(results) { h ->
                     Row(
                         Modifier.fillMaxWidth().clickable(enabled = !adding) {
@@ -222,6 +261,7 @@ fun AddGameScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
                             Text(h.description, style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                }
                 }
                 item {
                     if (query.length >= 2 && !loading) {
@@ -301,6 +341,7 @@ fun GameDetailScreen(
     var translating by remember { mutableStateOf<String?>(null) }
     var translateJob by remember { mutableStateOf<Job?>(null) }
     var editGame by remember { mutableStateOf(false) }
+    var lrCover by remember { mutableStateOf(false) }
     val storage = remember(game.guides) { Library.gameStorageBytes(game) }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -332,7 +373,7 @@ fun GameDetailScreen(
         LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
                 Row {
-                    GameCover(game, Modifier.size(110.dp, 140.dp).clickable { coverPicker.launch("image/*") })
+                    GameCover(game, Modifier.size(110.dp, 140.dp).clickable { editGame = true })
                     Column(Modifier.padding(start = 16.dp)) {
                         Text(game.title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clickable { editGame = true })
                         game.year?.let { Text(L("Released: ", "Çıkış: ") + it, style = MaterialTheme.typography.bodyMedium) }
@@ -457,11 +498,20 @@ fun GameDetailScreen(
                 Column {
                     OutlinedTextField(t, { t = it }, singleLine = true, label = { Text(L("Name", "Ad")) })
                     TextButton(onClick = { editGame = false; coverPicker.launch("image/*") }) { Text(L("Set custom artwork", "Özel kapak ayarla")) }
+                    TextButton(onClick = { editGame = false; lrCover = true }) { Text(L("Find cover by console (libretro)", "Konsoldan kapak bul (libretro)")) }
                 }
             },
             confirmButton = { TextButton(onClick = { Library.updateGame(gameId) { it.copy(title = t.trim().ifBlank { it.title }) }; editGame = false }) { Text("OK") } },
             dismissButton = { TextButton(onClick = { editGame = false }) { Text(L("Cancel", "İptal")) } }
         )
+    }
+
+    if (lrCover) {
+        LibretroCoverDialog(game.title, onDismiss = { lrCover = false }) { bytes, h ->
+            val p = Library.saveCoverBytes(bytes)
+            Library.updateGame(gameId) { it.copy(coverPath = p, platforms = it.platforms ?: h.console.short) }
+            lrCover = false
+        }
     }
 
     translateGuide?.let { g ->
@@ -522,4 +572,95 @@ fun GameDetailScreen(
             }
         )
     }
+}
+
+
+// ======================= libretro helpers =======================
+
+@Composable
+fun ConsolePicker(selected: Libretro.Console?, onPick: (Libretro.Console?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(L("Source", "Kaynak") + ":", Modifier.padding(end = 8.dp))
+        Box {
+            OutlinedButton(onClick = { open = true }) {
+                Icon(if (selected == null) Icons.Filled.Public else Icons.Filled.SportsEsports, null)
+                Spacer(Modifier.width(6.dp))
+                Text(selected?.short ?: L("Wikipedia (all games)", "Wikipedia (tüm oyunlar)"), maxLines = 1)
+                Icon(Icons.Filled.ArrowDropDown, null)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.heightIn(max = 460.dp)) {
+                DropdownMenuItem(text = { Text(L("Wikipedia (all games)", "Wikipedia (tüm oyunlar)")) }, leadingIcon = { Icon(Icons.Filled.Public, null) },
+                    onClick = { open = false; onPick(null) })
+                HorizontalDivider()
+                Libretro.consoles.forEach { c ->
+                    DropdownMenuItem(text = { Text(c.short) }, onClick = { open = false; onPick(c) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LibretroRow(h: Libretro.Hit, enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(56.dp, 72.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+            coil.compose.SubcomposeAsyncImage(
+                model = h.url, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit,
+                error = { AsyncImage(h.fallbackUrl, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
+            )
+        }
+        Column(Modifier.padding(start = 12.dp)) {
+            Text(h.title, style = MaterialTheme.typography.titleMedium)
+            Text(listOf(h.console.short, h.tags).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+/** Lets the user pick box art for an existing game from the libretro archive. */
+@Composable
+fun LibretroCoverDialog(initialQuery: String, onDismiss: () -> Unit, onPicked: (ByteArray, Libretro.Hit) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var console by remember { mutableStateOf(Libretro.consoles.firstOrNull { it.system == Prefs.coverConsole } ?: Libretro.consoles[0]) }
+    var query by remember { mutableStateOf(initialQuery) }
+    var hits by remember { mutableStateOf<List<Libretro.Hit>>(emptyList()) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(query, console) {
+        if (query.trim().length < 2) { hits = emptyList(); return@LaunchedEffect }
+        delay(350)
+        loading = true; error = null
+        try { hits = Libretro.search(ctx, console, query.trim()) } catch (e: Exception) { error = e.message }
+        loading = false
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text(L("Cancel", "İptal")) } },
+        title = { Text(L("Find cover by console", "Konsoldan kapak bul")) },
+        text = {
+            Column {
+                ConsolePicker(console) { c -> if (c != null) { console = c; Prefs.coverConsole = c.system } }
+                OutlinedTextField(query, { query = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                LazyColumn(Modifier.heightIn(max = 380.dp)) {
+                    items(hits) { h ->
+                        LibretroRow(h, enabled = !loading) {
+                            loading = true
+                            scope.launch {
+                                val b = Libretro.download(h)
+                                loading = false
+                                if (b != null) onPicked(b, h) else error = L("Download failed", "İndirme başarısız")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
 }

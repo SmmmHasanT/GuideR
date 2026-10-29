@@ -89,6 +89,9 @@ object Prefs {
     var raUser by StrPref("ra_user", "")
     var raKey by StrPref("ra_key", "")
 
+    // Game metadata source: "" = Wikipedia, otherwise a libretro system name
+    var coverConsole by StrPref("cover_console", "")
+
     // Translation
     var translateTarget by StrPref("translate_target", "tr")
 }
